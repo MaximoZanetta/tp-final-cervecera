@@ -23,3 +23,6 @@ __pycache__/
 # Configuraciones locales
 .env
 .vscode/
+
+# Datos generados automáticamente
+/data/consolidado_ee_unificado_inicial.csv
