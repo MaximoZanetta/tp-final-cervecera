@@ -1,4 +1,4 @@
-"""TP Final 2026 | Fase 3, paso 93: baselines, lineales, RF, XGBoost y LightGBM + Optuna.
+"""TP Final 2026 | Fase 3, pasos 90-95: modelos, Optuna y registro final.
 
 Guardá este archivo como src/train_model.py.
 No lee filas de Test para modelar ni utiliza sus etiquetas.
@@ -8,6 +8,7 @@ Los estimadores lineales se escalan dentro de Pipeline ajustado solo con Train.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import argparse
 from pathlib import Path
 import hashlib
 import json
@@ -20,6 +21,7 @@ from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
 import optuna
+import joblib
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -31,6 +33,9 @@ LOGS = RAIZ / "results" / "experiment_logs.csv"
 SEMILLA = 42
 N_TRAIN = 736
 N_VALIDATION = 157
+MODELOS_DIR = RAIZ / "models"
+REGISTRO = MODELOS_DIR / "model_registry.json"
+VERSION = "v1.0.0"
 
 
 def verificar_integridad() -> None:
@@ -459,6 +464,197 @@ def guardar_logs(tabla: pd.DataFrame) -> None:
     a_guardar.to_csv(LOGS, mode="a", index=False, header=not LOGS.exists())
 
 
+
+
+def verificar_codigo_versionado() -> str:
+    """Exige que el código usado para entrenar corresponda a un commit real.
+
+    El artefacto y el registro se incorporarán en un commit posterior;
+    `git_commit` representa la versión de código/datos con que se entrenó.
+    """
+    archivos_criticos = [
+        "src/train_model.py",
+        "requirements.txt",
+        "data/processed/dataset_final.csv",
+        "data/checksums.json",
+    ]
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=RAIZ, text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+        estado = subprocess.check_output(
+            ["git", "status", "--porcelain", "--", *archivos_criticos],
+            cwd=RAIZ, text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("No se puede obtener el commit de Git para el registro.") from exc
+    if estado:
+        raise RuntimeError(
+            "Hay cambios sin commitear en archivos necesarios para reproducir "
+            "el entrenamiento:\n" + estado +
+            "\nHacé primero un commit con src/train_model.py, "
+            "requirements.txt y cualquier cambio de datos."
+        )
+    return commit
+
+
+def cargar_ganador_de_logs() -> tuple[float, dict]:
+    """Comprueba en el tracking que el menor MAE de Validation es LASSO.
+
+    Los logs existentes contienen distintos ensayos y pueden repetir
+    experimentos; el criterio sigue siendo MAE sobre Validation.
+    """
+    if not LOGS.exists():
+        raise FileNotFoundError(
+            f"Falta {LOGS}. Ejecutá primero el entrenamiento/Optuna."
+        )
+    logs = pd.read_csv(LOGS)
+    requeridas = {"modelo", "particion", "MAE", "hiperparametros"}
+    if not requeridas.issubset(logs.columns):
+        raise ValueError(f"El log no contiene las columnas: {sorted(requeridas)}")
+
+    dev = logs.loc[logs["particion"].eq("validation")].copy()
+    dev["MAE"] = pd.to_numeric(dev["MAE"], errors="coerce")
+    dev = dev.dropna(subset=["MAE"])
+    if dev.empty:
+        raise ValueError("No hay métricas válidas de Validation en el log.")
+
+    mejor = dev.loc[dev["MAE"].idxmin()]
+    if mejor["modelo"] != "LASSO":
+        raise ValueError(
+            f"En experiment_logs.csv el menor MAE lo tiene {mejor['modelo']} "
+            f"({mejor['MAE']:.2f}), no LASSO. Revisar selección antes de guardar."
+        )
+    parametros = json.loads(mejor["hiperparametros"])
+    alpha = float(parametros["alpha"])
+    print("Ganador identificado en el tracking:", mejor["modelo"])
+    print(f"MAE registrado en Validation: {mejor['MAE']:.2f}")
+    print("Alpha seleccionado:", alpha)
+    return alpha, {"MAE_log": float(mejor["MAE"]), "parametros_log": parametros}
+
+
+def finalizar_modelo() -> None:
+    """Evalúa con Train→Validation y reajusta una sola vez con Train+Val.
+
+    No carga ni inspecciona Test. Tampoco repite las búsquedas con Optuna.
+    Guarda el Pipeline completo (StandardScaler + Lasso) en joblib.
+    """
+    print("\nPASO 95 - ENTRENAMIENTO FINAL Y MODEL REGISTRY")
+    commit = verificar_codigo_versionado()
+    verificar_integridad()
+    alpha, info_log = cargar_ganador_de_logs()
+    datos, features = cargar_desarrollo()  # pd.read_csv(nrows=893)
+
+    train = datos.loc[datos["particion"].eq("train")].copy()
+    val = datos.loc[datos["particion"].eq("validation")].copy()
+
+    def nuevo_pipeline() -> Pipeline:
+        return Pipeline([
+            ("scaler", StandardScaler()),
+            ("regresor", Lasso(alpha=alpha, max_iter=30000, random_state=SEMILLA)),
+        ])
+
+    # Métricas reproducidas con el ajuste en Train únicamente.
+    modelo_validacion = nuevo_pipeline()
+    modelo_validacion.fit(train[features], train["target_manana"])
+    pred = modelo_validacion.predict(val[features])
+    mae = float(mean_absolute_error(val["target_manana"], pred))
+    rmse = float(mean_squared_error(val["target_manana"], pred) ** 0.5)
+    r2 = float(r2_score(val["target_manana"], pred))
+
+    if abs(mae - info_log["MAE_log"]) > 0.02:
+        raise RuntimeError(
+            f"MAE actual ({mae:.4f}) no coincide con el log "
+            f"({info_log['MAE_log']:.4f}). Revisá entorno/datos antes de registrar."
+        )
+
+    print(f"Validation (modelo entrenado solo en Train): MAE={mae:.2f}, "
+          f"RMSE={rmse:.2f}, R²={r2:.4f}")
+
+    # Una vez fijado el modelo y alpha, usar todas las filas de desarrollo.
+    final = nuevo_pipeline()
+    final.fit(datos[features], datos["target_manana"])
+    print("Reentrenamiento: Train + Validation =", len(datos), "filas")
+    print("Shape:", datos[features].shape)
+    print("Test: NO cargado, NO evaluado")
+
+    MODELOS_DIR.mkdir(parents=True, exist_ok=True)
+    ruta_modelo = MODELOS_DIR / f"modelo_{VERSION}.pkl"
+    if ruta_modelo.exists():
+        raise FileExistsError(
+            f"Ya existe {ruta_modelo}. No se sobrescriben modelos versionados. "
+            "Si corresponde una nueva versión, cambiá VERSION."
+        )
+
+    # joblib serializa tanto el escalador como el regresor.
+    joblib.dump(final, ruta_modelo)
+    hash_modelo = hashlib.sha256(ruta_modelo.read_bytes()).hexdigest()
+    with CHECKSUMS.open(encoding="utf-8") as f:
+        checksum_datos = json.load(f)["data/processed/dataset_final.csv"]
+
+    entrada = {
+        "version": VERSION,
+        "modelo": "LASSO",
+        "path": ruta_modelo.relative_to(RAIZ).as_posix(),
+        "fecha_entrenamiento_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "training_script": "src/train_model.py",
+        "git_commit": commit,
+        "semilla": SEMILLA,
+        "hiperparametros": {
+            "alpha": alpha,
+            "max_iter": 30000,
+            "random_state": SEMILLA,
+            "escalado": "StandardScaler dentro de Pipeline",
+        },
+        "metricas_validation": {
+            "MAE": mae,
+            "RMSE": rmse,
+            "R2": r2,
+            "filas": len(val),
+            "nota": "Métricas previas al reentrenamiento, con ajuste solo en Train",
+        },
+        "reentrenamiento": {
+            "particiones": ["train", "validation"],
+            "filas": len(datos),
+        },
+        "features": features,
+        "dataset": "data/processed/dataset_final.csv",
+        "dataset_sha256_normalizado": checksum_datos,
+        "modelo_sha256": hash_modelo,
+    }
+    if REGISTRO.exists():
+        with REGISTRO.open(encoding="utf-8") as f:
+            registro = json.load(f)
+        if not isinstance(registro.get("models"), dict):
+            raise ValueError("El model_registry existente no tiene formato 'models'.")
+        if VERSION in registro["models"]:
+            raise FileExistsError(f"La versión {VERSION} ya está en el registry.")
+    else:
+        registro = {"latest": VERSION, "models": {}}
+    registro["models"][VERSION] = entrada
+    registro["latest"] = VERSION
+
+    with REGISTRO.open("w", encoding="utf-8") as f:
+        json.dump(registro, f, indent=2, ensure_ascii=False, allow_nan=False)
+        f.write("\n")
+
+    # Confirmar que el artefacto se puede deserializar y conserva el orden.
+    cargado = joblib.load(ruta_modelo)
+    if list(cargado.feature_names_in_) != features:
+        raise RuntimeError("El orden de las features no coincide al cargar el modelo.")
+    if not np.isfinite(cargado.predict(val[features])).all():
+        raise RuntimeError("El modelo serializado produce predicciones no finitas.")
+
+    print("\nARTEFACTOS GENERADOS")
+    print("Modelo:", ruta_modelo.relative_to(RAIZ))
+    print("Registry:", REGISTRO.relative_to(RAIZ))
+    print("Versión:", VERSION)
+    print("Commit de código usado para entrenar:", commit)
+    print("SHA-256 del modelo:", hash_modelo)
+    print("Modelo serializado y recargado: OK")
+    print("No se reportaron métricas de Test.")
+
 def main() -> None:
     verificar_integridad()
     datos, features = cargar_desarrollo()
@@ -585,4 +781,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Modelado Fase 3 - TP final")
+    parser.add_argument(
+        "--finalizar", action="store_true",
+        help="Reentrena el mejor modelo en Train+Validation y crea models/ sin repetir Optuna",
+    )
+    args = parser.parse_args()
+    if args.finalizar:
+        finalizar_modelo()
+    else:
+        main()
