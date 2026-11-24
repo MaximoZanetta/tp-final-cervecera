@@ -17,7 +17,7 @@ Para ello se utilizan registros históricos de totalizadores industriales corres
 - Jupyter Notebook
 - Git y GitHub
 
-Se contempla utilizar XGBoost y LightGBM en las etapas posteriores de modelado.
+Para el entrenamiento y la optimización de modelos también se utilizan XGBoost, LightGBM y Optuna. Los modelos entrenados se serializan mediante Joblib y se documentan en un registro local de modelos.
 
 ## Instalación
 
@@ -150,6 +150,89 @@ El procesamiento utiliza particiones cronológicas, reglas de transformación de
 
 El dataset generado puede verificarse mediante su checksum SHA-256, registrado tanto en `data/checksums.json` como en `data/processed/data_lineage.json`.
 
-## Próximas etapas
+## Fase 3: Entrenamiento y Versionado de Modelos
 
-Las siguientes fases abordarán el entrenamiento y comparación de modelos predictivos, el ajuste de hiperparámetros y la evaluación final sobre el conjunto de Test.
+Se entrenaron y compararon diferentes modelos de regresión para predecir el consumo de refrigeración del día siguiente, utilizando las 22 características seleccionadas durante el preprocesamiento.
+
+### Modelos evaluados
+
+Se implementaron dos modelos de referencia obligatorios:
+
+- **Persistencia:** predice para mañana el mismo consumo observado hoy.
+- **Media móvil de 7 días:** utiliza el promedio del consumo de los siete días calendario hasta el día actual. Cuando hay fechas faltantes, considera los días disponibles.
+
+Posteriormente se entrenaron cinco alternativas:
+
+- Ridge Regression.
+- LASSO Regression.
+- Random Forest Regressor.
+- XGBoost.
+- LightGBM.
+
+Para Random Forest, XGBoost y LightGBM se utilizó Optuna con `TPESampler` y semilla 42 para optimizar los hiperparámetros.
+
+La selección del modelo se realizó minimizando el MAE sobre Validation, manteniendo Test reservado para la evaluación final.
+
+### Resultados en Validation
+
+| Modelo | MAE | RMSE | R² |
+|---|---:|---:|---:|
+| LASSO | 2365.00 | 2961.56 | 0.447 |
+| Media móvil de 7 días | 2492.70 | 3282.50 | 0.321 |
+| Ridge | 2494.85 | 3087.42 | 0.399 |
+| Random Forest | 2540.33 | 3110.43 | 0.390 |
+| XGBoost | 2581.72 | 3144.04 | 0.377 |
+| LightGBM | 2607.13 | 3231.81 | 0.342 |
+| Persistencia | 2739.85 | 3419.28 | 0.263 |
+
+El modelo seleccionado fue **LASSO con alpha = 300**, al obtener el menor MAE de validación.
+
+La mejora respecto del mejor baseline fue aproximadamente del 5,1 %.
+
+### Diagnóstico del modelo
+
+Se realizó un análisis de residuos, distribución de errores, evolución temporal, comparación de predicciones frente a valores reales e interpretación de los coeficientes del modelo.
+
+El análisis identificó una tendencia moderada a sobreestimar el consumo, especialmente en algunos días con consumos reales reducidos.
+
+Los resultados y gráficos se encuentran en `results/` y se documentan en `notebooks/modelado.ipynb`.
+
+### Registro y versionado
+
+Una vez seleccionado el mejor modelo, LASSO se reentrenó con Train + Validation, utilizando 893 observaciones y 22 características.
+
+Se generaron los siguientes archivos:
+
+- `models/modelo_v1.0.0.pkl`: modelo serializado con StandardScaler y LASSO.
+- `models/model_registry.json`: versión, hiperparámetros, métricas de validación, características, fecha y commit de entrenamiento.
+- `results/experiment_logs.csv`: seguimiento de experimentos con hiperparámetros y métricas.
+
+Las métricas de Validation registradas corresponden al modelo entrenado exclusivamente con Train, antes del reentrenamiento final.
+
+### Ejecución
+
+Para ejecutar los experimentos:
+
+```bash
+python src/train_model.py
+```
+
+Para generar el diagnóstico del modelo seleccionado:
+
+```bash
+python src/diagnostico_validacion.py
+```
+
+Para reentrenar y registrar el modelo ganador a partir del historial de experimentos existente:
+
+```bash
+python src/train_model.py --finalizar
+```
+
+El último comando requiere que el código de entrenamiento esté previamente versionado en Git.
+
+El análisis también puede consultarse en `notebooks/modelado.ipynb`.
+
+**El conjunto de Test todavía no fue utilizado para la evaluación del modelo.**
+
+La siguiente etapa del proyecto corresponde a la Fase 4: Pipeline de Predicción. Se implementará src/predict.py para cargar el modelo desde el registro, reutilizar el preprocesamiento y generar predicciones diarias a partir de nuevos archivos Excel.

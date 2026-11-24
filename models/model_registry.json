@@ -1,0 +1,61 @@
+{
+  "latest": "v1.0.0",
+  "models": {
+    "v1.0.0": {
+      "version": "v1.0.0",
+      "modelo": "LASSO",
+      "path": "models/modelo_v1.0.0.pkl",
+      "fecha_entrenamiento_utc": "2026-11-23T15:30:26+00:00",
+      "training_script": "src/train_model.py",
+      "git_commit": "96400575d16401eccd677faee17a1f52e73fefde",
+      "semilla": 42,
+      "hiperparametros": {
+        "alpha": 300.0,
+        "max_iter": 30000,
+        "random_state": 42,
+        "escalado": "StandardScaler dentro de Pipeline"
+      },
+      "metricas_validation": {
+        "MAE": 2364.995348185916,
+        "RMSE": 2961.560682395277,
+        "R2": 0.4472147699619322,
+        "filas": 157,
+        "nota": "Métricas previas al reentrenamiento, con ajuste solo en Train"
+      },
+      "reentrenamiento": {
+        "particiones": [
+          "train",
+          "validation"
+        ],
+        "filas": 893
+      },
+      "features": [
+        "cos_anual",
+        "frio_kw",
+        "EE | Servicios (Kw)",
+        "EE | Planta (Kw)",
+        "frio_lag_7d",
+        "GasVapor | Tot Vap Lav L3 / Hora",
+        "GasVapor | Vapor Cocina (Kg)",
+        "Ratio | Frio sobre Servicios",
+        "Aire | Totaliador_Aire_L4",
+        "GasVapor | Tot_Vapor_CIP_Bodega",
+        "frio_media_3d",
+        "EE | Envasado (Kw)",
+        "Ratio | Frio por Hl Bodega | faltante",
+        "EE | Linea 4 (Kw)",
+        "GasVapor | VAPOR DE LINEA 4 KG",
+        "frio_media_7d | faltante",
+        "Aire | Totalizador_Aire_Bodega",
+        "frio_media_7d",
+        "Agua | Agua Calderas",
+        "dia_semana",
+        "GasVapor | Vapor Envasado (Kg)",
+        "GasVapor | Vapor Servicio (Kg)"
+      ],
+      "dataset": "data/processed/dataset_final.csv",
+      "dataset_sha256_normalizado": "6ff74dd79ae0b5dece4944e1f5b4cb5723c2b700be2785863fd54083a4bf1d3c",
+      "modelo_sha256": "c7fb9b32db930fb91eb8e6f05a10597fa7c94879a3220d6395768940e5ee8e9d"
+    }
+  }
+}
