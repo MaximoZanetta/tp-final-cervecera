@@ -235,4 +235,97 @@ El análisis también puede consultarse en `notebooks/modelado.ipynb`.
 
 **El conjunto de Test todavía no fue utilizado para la evaluación del modelo.**
 
-La siguiente etapa del proyecto corresponde a la Fase 4: Pipeline de Predicción. Se implementará src/predict.py para cargar el modelo desde el registro, reutilizar el preprocesamiento y generar predicciones diarias a partir de nuevos archivos Excel.
+## Fase 4: Pipeline de predicción
+
+Se implementó `src/predict.py`, que permite predecir el consumo eléctrico de refrigeración del día siguiente (D+1) a partir de un archivo Excel con mediciones industriales del día D.
+
+### Ejecución
+
+Instalar las dependencias:
+
+```bash
+uv pip install -r requirements.txt
+```
+
+Ejecutar el predictor desde la raíz del proyecto:
+
+```bash
+python src/predict.py "data/Totalizadores Planta - 2021_2023.xlsx"
+```
+
+El script carga automáticamente la versión del modelo indicada en `models/model_registry.json`, comprueba su integridad y reutiliza las transformaciones del preprocesamiento.
+
+### Formato de entrada
+
+El Excel debe contener las hojas necesarias para reconstruir las características del modelo:
+
+- Consolidado EE
+- Consolidado Produccion
+- Consolidado Agua
+- Consolidado GasVapor
+- Consolidado Aire
+
+Se permiten hojas y columnas adicionales, así como cambios en su orden. El script identifica las columnas por nombre y produce mensajes descriptivos cuando falta información requerida.
+
+### Formato de salida
+
+El resultado se guarda en:
+
+`results/predicciones.csv`
+
+Contiene dos columnas:
+
+- `fecha`: fecha del día D.
+- `prediccion_frio_kw`: consumo de refrigeración estimado para D+1.
+
+Se genera una fila por cada jornada que supera los controles de calidad del preprocesamiento.
+
+### Validaciones
+
+Para verificar la estructura del Excel y la carga del modelo:
+
+```bash
+python src/predict.py "data/Totalizadores Planta - 2021_2023.xlsx" --validar
+```
+
+Para auditar los registros diarios:
+
+```bash
+python src/predict.py "data/Totalizadores Planta - 2021_2023.xlsx" --auditar
+```
+
+Para verificar las características generadas:
+
+```bash
+python src/predict.py "data/Totalizadores Planta - 2021_2023.xlsx" --caracteristicas
+```
+
+### Pruebas de robustez
+
+Ejecutar:
+
+```bash
+python src/probar_robustez_predict.py
+```
+
+Se verificaron cinco casos:
+
+1. Excel con hojas y columnas adicionales o reordenadas.
+2. Falta de una columna obligatoria.
+3. Falta de una hoja obligatoria.
+4. Solicitud de una versión inexistente del modelo.
+5. Generación de predicciones sobre datos sintéticos válidos.
+
+Resultado: **5/5 pruebas correctas**.
+
+### Resultados obtenidos
+
+Con el Excel histórico `Totalizadores Planta - 2021_2023.xlsx`:
+
+- Modelo: LASSO v1.0.0.
+- Características utilizadas: 22.
+- Días predichos: 568.
+- Fechas duplicadas: 0.
+- Predicciones no finitas: 0.
+
+Estas pruebas verifican el funcionamiento del pipeline. No constituyen una evaluación del desempeño sobre el conjunto Test, que permanece reservado para la evaluación final
