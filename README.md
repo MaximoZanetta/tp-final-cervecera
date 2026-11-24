@@ -21,7 +21,16 @@ Para el entrenamiento y la optimización de modelos también se utilizan XGBoost
 
 ## Instalación
 
-Crear y activar el entorno de trabajo:
+### 1. Clonar el repositorio
+
+Con Git y Conda instalados, ejecutar:
+
+```bash
+git clone https://github.com/MaximoZanetta/tp-final-cervecera.git
+cd tp-final-cervecera
+```
+
+### 2. Crear y activar el entorno de trabajo
 
 ```bash
 conda create -n cervecera_env python=3.12
@@ -30,9 +39,23 @@ python -m pip install uv
 uv pip install -r requirements.txt
 ```
 
+Comprobar que se está usando Python 3.12 en el entorno activado:
+
+```bash
+python --version
+```
+
+Para trabajar con los notebooks, registrar el kernel:
+
+```bash
+python -m ipykernel install --user --name cervecera_env --display-name cervecera_env
+```
+
+Todos los comandos siguientes se ejecutan desde la raíz del repositorio, con `cervecera_env` activado. Los ejemplos que utilizan `del` están escritos para Windows (CMD o Anaconda Prompt).
+
 ## Datos
 
-Los archivos Excel originales no se incluyen en el repositorio y deben colocarse dentro de la carpeta `data/`, respetando exactamente estos nombres:
+Los archivos Excel originales fueron proporcionados por la cátedra como material del Trabajo Práctico Final. No se incluyen en GitHub: se deben obtener del material de la materia y colocar dentro de `data/`, respetando exactamente los nombres de los archivos utilizados por este proyecto (pueden diferir de los nombres indicados en la consigna):
 
 - `Totalizadores Planta 2020_2022.xlsx`
 - `Totalizadores Planta - 2021_2023.xlsx`
@@ -40,34 +63,53 @@ Los archivos Excel originales no se incluyen en el repositorio y deben colocarse
 
 El archivo `data/checksums.json` contiene los hashes SHA-256 utilizados para comprobar la integridad de las fuentes y del dataset procesado.
 
-Para reproducir el preprocesamiento desde los datos originales, es necesario contar con los tres Excel.
+Para reproducir el preprocesamiento desde los datos originales, es necesario contar con los tres Excel. El script comprueba automáticamente sus hashes antes de procesarlos. No se deben modificar los archivos ni actualizar los hashes para ocultar una diferencia.
+
+El Excel externo de evaluación oculta no está incluido ni se necesita para reproducir las fases de desarrollo. Para utilizar el predictor con el modelo ya registrado solo se necesita el Excel que se desea predecir, además de los artefactos versionados del repositorio.
 
 ## Estructura del proyecto
 
 ```text
-tp-final/
+tp-final-cervecera/
 ├── data/
-│   ├── processed/
-│   │   ├── dataset_final.csv
-│   │   └── data_lineage.json
-│   └── checksums.json
+│   ├── checksums.json
+│   └── processed/
+│       ├── dataset_final.csv
+│       └── data_lineage.json
+├── models/
+│   ├── modelo_v1.0.0.pkl
+│   └── model_registry.json
 ├── notebooks/
 │   ├── eda.ipynb
-│   └── preprocesamiento.ipynb
+│   ├── preprocesamiento.ipynb
+│   ├── modelado.ipynb
+│   └── SHA256SUMS.txt
 ├── src/
-│   └── preprocessing_pipeline.py
+│   ├── preprocessing_pipeline.py
+│   ├── train_model.py
+│   ├── diagnostico_validacion.py
+│   ├── predict.py
+│   └── probar_robustez_predict.py
+├── results/
+│   ├── experiment_logs.csv
+│   ├── lasso_coeficientes.csv
+│   ├── lasso_validation_predicciones.csv
+│   ├── predicciones.csv
+│   └── figures/
 ├── requirements.txt
 ├── .gitignore
 └── README.md
 ```
 
-Los nombres de los notebooks de otras fases pueden variar.
+Los tres Excel deben agregarse localmente en `data/`. El EDA también genera `data/consolidado_ee_unificado_inicial.csv`, que no se versiona. El árbol muestra los archivos principales del proyecto; los archivos temporales de comprobación no forman parte de la entrega.
 
 ## Fase 1: Análisis Exploratorio de Datos
 
 Se analizaron los registros históricos de consumo energético industrial para identificar patrones, distribuciones, valores faltantes, registros anómalos e inconsistencias temporales.
 
 Los resultados del EDA se utilizaron para justificar las decisiones de limpieza y construcción de características de la Fase 2.
+
+Abrir `notebooks/eda.ipynb` con el kernel `cervecera_env` y ejecutar todas las celdas en orden. El notebook requiere los tres Excel originales y genera el consolidado inicial de electricidad y su registro de integridad.
 
 ## Fase 2: Preprocesamiento y Selección de Variables
 
@@ -80,7 +122,9 @@ El procesamiento incluye:
 5. **Selección de variables:** comparación entre importancia de características con Random Forest y regularización LASSO.
 6. **Preparación final:** generación del dataset procesado sin aplicar escalado previo.
 
-Los parámetros de limpieza e imputación se calculan usando Train y se reutilizan en las demás particiones.
+Los parámetros de limpieza e imputación se calculan usando Train y se reutilizan en las demás particiones. Las funciones de aplicación de las transformaciones se comparten con el predictor, sin volver a estimar parámetros sobre los datos de entrada.
+
+Se utiliza el cierre diario de las 23:59. Las características del día D se alinean con el consumo del día calendario D+1; no se utiliza como objetivo el siguiente registro disponible cuando hay un salto de fechas.
 
 ### División temporal
 
@@ -122,7 +166,7 @@ Desde la raíz del proyecto, con el entorno activado:
 python src/preprocessing_pipeline.py
 ```
 
-El script verifica las fuentes originales, ejecuta las transformaciones, prepara las particiones temporales y genera los entregables.
+El script verifica las fuentes originales, ejecuta las transformaciones, prepara las particiones temporales y genera los entregables. Al ejecutarse vuelve a escribir `dataset_final.csv`, `data_lineage.json` y `checksums.json`. Para verificar la reproducibilidad sin alterar los artefactos oficiales, ejecutar este procedimiento en un clon independiente.
 
 También se puede consultar y ejecutar el procedimiento documentado en:
 
@@ -148,7 +192,9 @@ Registro de hashes SHA-256 para controlar la integridad de los archivos.
 
 El procesamiento utiliza particiones cronológicas, reglas de transformación definidas a partir de Train y semillas fijas para los métodos de selección que involucran aleatoriedad.
 
-El dataset generado puede verificarse mediante su checksum SHA-256, registrado tanto en `data/checksums.json` como en `data/processed/data_lineage.json`.
+El dataset generado puede verificarse mediante su checksum SHA-256, registrado tanto en `data/checksums.json` como en `data/processed/data_lineage.json`. El entrenamiento verifica el hash del CSV normalizando los saltos de línea a LF.
+
+La reproducción de los experimentos y del entrenamiento final se explica en la Fase 3. La comprobación completa de instalación y ejecución en una máquina independiente sigue siendo una validación previa a la entrega, no un resultado ya demostrado.
 
 ## Fase 3: Entrenamiento y Versionado de Modelos
 
@@ -211,11 +257,15 @@ Las métricas de Validation registradas corresponden al modelo entrenado exclusi
 
 ### Ejecución
 
-Para ejecutar los experimentos:
+El repositorio incluye el modelo final y el historial de experimentos. Para generar predicciones con esa versión no hace falta reentrenar ni repetir la búsqueda de hiperparámetros.
+
+Para repetir los experimentos, preferentemente en un clon de verificación:
 
 ```bash
 python src/train_model.py
 ```
+
+El script agrega nuevas ejecuciones a `results/experiment_logs.csv`; no reemplaza el historial existente.
 
 Para generar el diagnóstico del modelo seleccionado:
 
@@ -223,13 +273,38 @@ Para generar el diagnóstico del modelo seleccionado:
 python src/diagnostico_validacion.py
 ```
 
-Para reentrenar y registrar el modelo ganador a partir del historial de experimentos existente:
+### Reproducir el entrenamiento final sin sobrescribir el modelo oficial
+
+`--finalizar` utiliza el historial de experimentos para identificar el ganador y reproduce las métricas de Validation antes de ajustar el modelo con Train + Validation. No repite Optuna ni evalúa Test.
+
+El comando no puede ejecutarse directamente sobre un clon que ya contiene `modelo_v1.0.0.pkl` y su entrada en el registro: el script protege las versiones existentes y no permite sobrescribirlas. Para verificar el entrenamiento, usar un clon independiente del repositorio (no el directorio de trabajo habitual).
+
+Desde el directorio que contiene el repositorio original, con el entorno activado:
 
 ```bash
+git clone https://github.com/MaximoZanetta/tp-final-cervecera.git tp-final-reproduccion
+cd tp-final-reproduccion
+```
+
+Verificar que los archivos críticos del entrenamiento estén limpios:
+
+```bash
+git status --short -- src/train_model.py requirements.txt data/processed/dataset_final.csv data/checksums.json
+```
+
+El comando no debe mostrar cambios. Si se regeneraron datos y hay diferencias, primero investigarlas; no registrar un modelo con datos distintos de los esperados.
+
+Únicamente dentro de este clon de verificación, eliminar las copias del modelo y del registro (en Windows CMD):
+
+```cmd
+del models\modelo_v1.0.0.pkl
+del models\model_registry.json
 python src/train_model.py --finalizar
 ```
 
-El último comando requiere que el código de entrenamiento esté previamente versionado en Git.
+El script volverá a crear ambos archivos. No hace falta volver a ejecutar todos los experimentos porque el clon ya contiene `results/experiment_logs.csv`. El modelo oficial y su registro en el repositorio original permanecen intactos.
+
+Se espera reproducir el MAE de Validation de aproximadamente 2365 y el ajuste con 893 filas. La fecha y el commit del nuevo registro pueden diferir de los del artefacto oficial. No publicar ni commitear esta copia como si fuera la versión oficial. Eliminar el clon de verificación cuando termine la prueba.
 
 El análisis también puede consultarse en `notebooks/modelado.ipynb`.
 
@@ -241,19 +316,19 @@ Se implementó `src/predict.py`, que permite predecir el consumo eléctrico de r
 
 ### Ejecución
 
-Instalar las dependencias:
-
-```bash
-uv pip install -r requirements.txt
-```
-
-Ejecutar el predictor desde la raíz del proyecto:
+Con el entorno instalado y activado, ejecutar el predictor desde la raíz del proyecto:
 
 ```bash
 python src/predict.py "data/Totalizadores Planta - 2021_2023.xlsx"
 ```
 
-El script carga automáticamente la versión del modelo indicada en `models/model_registry.json`, comprueba su integridad y reutiliza las transformaciones del preprocesamiento.
+El script carga automáticamente la última versión del modelo indicada en `models/model_registry.json`, comprueba su integridad y aplica las transformaciones compartidas de `src/preprocessing_pipeline.py` mediante `load_and_preprocess()`. Usa los parámetros aprendidos en Train que están guardados en `data/processed/data_lineage.json`, y respeta el orden de las características del registro. El escalado se realiza dentro del modelo serializado.
+
+Para elegir explícitamente la versión y guardar el resultado sin sobrescribir el CSV oficial:
+
+```bash
+python src/predict.py "data/Totalizadores Planta - 2021_2023.xlsx" --version v1.0.0 --salida results/predicciones_verificacion.csv
+```
 
 ### Formato de entrada
 
@@ -278,7 +353,7 @@ Contiene dos columnas:
 - `fecha`: fecha del día D.
 - `prediccion_frio_kw`: consumo de refrigeración estimado para D+1.
 
-Se genera una fila por cada jornada que supera los controles de calidad del preprocesamiento.
+Se genera una fila por cada jornada que supera los controles de calidad y dispone de las características necesarias. Las fechas de salida se ordenan y no se duplican.
 
 ### Validaciones
 
@@ -298,6 +373,12 @@ Para verificar las características generadas:
 
 ```bash
 python src/predict.py "data/Totalizadores Planta - 2021_2023.xlsx" --caracteristicas
+```
+
+Para comparar las características reconstruidas con las fechas comunes de Train, sin consultar las etiquetas:
+
+```bash
+python src/predict.py "data/Totalizadores Planta - 2021_2023.xlsx" --comparar-train
 ```
 
 ### Pruebas de robustez
@@ -328,4 +409,22 @@ Con el Excel histórico `Totalizadores Planta - 2021_2023.xlsx`:
 - Fechas duplicadas: 0.
 - Predicciones no finitas: 0.
 
-Estas pruebas verifican el funcionamiento del pipeline. No constituyen una evaluación del desempeño sobre el conjunto Test, que permanece reservado para la evaluación final
+Estas pruebas verifican el funcionamiento del pipeline. No constituyen una evaluación del desempeño sobre el conjunto Test, que permanece reservado para la evaluación final.
+
+Después de refactorizar `preprocessing_pipeline.py` y `predict.py` para compartir transformaciones, se repitieron las cinco pruebas de robustez y se compararon las 568 predicciones del Excel histórico con el CSV original mediante `pd.testing.assert_frame_equal(..., check_exact=True)`. Las cinco pruebas pasaron y los dos CSV coincidieron exactamente.
+
+Para repetir la comparación, generar primero `results/predicciones_verificacion.csv` con el comando anterior y ejecutar:
+
+```bash
+python -c "import pandas as pd; a=pd.read_csv('results/predicciones.csv'); b=pd.read_csv('results/predicciones_verificacion.csv'); pd.testing.assert_frame_equal(a,b,check_exact=True); print('Predicciones identicas')"
+```
+
+Esta verificación no calcula métricas de Test. La equivalencia del dataset regenerado tras la refactorización y la evaluación final sobre Test se comprueban por separado.
+
+## Orden recomendado de reproducción
+
+**Usar el modelo existente:** clonar, configurar el entorno, colocar un Excel compatible en `data/`, ejecutar `src/probar_robustez_predict.py` y luego `src/predict.py`. No es necesario ejecutar el EDA ni reentrenar.
+
+**Reproducir el desarrollo completo:** clonar en una carpeta independiente, configurar el entorno, obtener los tres Excel, ejecutar `eda.ipynb`, ejecutar `src/preprocessing_pipeline.py`, comprobar el dataset contra la versión oficial, consultar `preprocesamiento.ipynb`, repetir los experimentos con `src/train_model.py`, generar el diagnóstico con `src/diagnostico_validacion.py` y reproducir el modelo final siguiendo la sección de entrenamiento final (en el mismo clon de verificación, siempre que los archivos críticos estén limpios). Finalmente, ejecutar las pruebas de robustez y el predictor. Los cambios de artefactos en este clon no deben publicarse como una nueva versión oficial.
+
+El Test interno permanece reservado para una única evaluación final, después de congelar el modelo. El Test oculto externo será evaluado por la cátedra. Los resultados de Validation y las pruebas de funcionamiento no sustituyen esas evaluaciones.

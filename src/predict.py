@@ -1,6 +1,6 @@
 """Fase 4: predicción diaria con el modelo versionado.
 
-Reutiliza la limpieza/calendario de preprocessing_pipeline.py y los
+Reutiliza las transformaciones de preprocessing_pipeline.py y los
 parámetros originales de Train registrados en data_lineage.json.
 Sin usar etiquetas de Test ni ajustar parámetros con el Excel nuevo.
 """
@@ -18,7 +18,11 @@ import numpy as np
 
 # Importar funciones ya usadas en Fase 2. No duplicar su normalización temporal.
 from preprocessing_pipeline import (
-    limpiar_temporal, seleccionar_jornadas_temporales, agregar_calendario
+    limpiar_temporal, seleccionar_jornadas_temporales, agregar_calendario,
+    normalizar_horas, evaluar_calidad_frio,
+    aplicar_umbrales_extremos, aplicar_imputacion_industrial,
+    calcular_ratios_industriales, calcular_historicas, incorporar_historicas,
+    aplicar_imputacion_historica, aplicar_transformacion_derivada
 )
 
 RAIZ = Path(__file__).resolve().parent.parent
@@ -169,13 +173,7 @@ def _columnas_originales(libro: pd.ExcelFile, hoja: str, requeridas: list[str]):
 
 def _normalizar_horas(horas: pd.Series) -> pd.Series:
     """Aplica el mismo ajuste de +1 segundo que la Fase 2."""
-    horas = pd.to_timedelta(horas.astype(str), errors="coerce")
-    esperadas = pd.TimedeltaIndex(
-        [pd.Timedelta(hours=h) for h in range(24)]
-        + [pd.Timedelta(hours=23, minutes=59)]
-    )
-    segundo = pd.Timedelta(seconds=1)
-    return horas.where(~(horas - segundo).isin(esperadas), horas - segundo)
+    return normalizar_horas(pd.to_timedelta(horas.astype(str), errors="coerce"))
 
 
 def _leer_hoja_necesaria(libro: pd.ExcelFile, hoja: str, requeridas: list[str]):
@@ -235,26 +233,8 @@ def auditar_jornadas_excel(
         ee_temporal = seleccionar_jornadas_temporales(limpiar_temporal(ee_raw))
         # Calidad del totalizador: mismas seis reglas de Fase 2, sin los
         # asserts de conteos fijos del dataset histórico.
-        claves = ["archivo_origen", "fecha"]
-        ordenados = ee_temporal.sort_values(claves + ["hora_normalizada"]).copy()
-        ordenados["variacion"] = ordenados.groupby(claves)["frio_kw"].diff()
-        calidad = ordenados.groupby(claves).agg(
-            nulos=("frio_kw", lambda s: s.isna().sum()),
-            descensos=("variacion", lambda s: (s < 0).sum()),
-            negativos=("frio_kw", lambda s: (s < 0).sum()),
-            maximo=("frio_kw", "max"),
-        )
-        calidad["inicio"] = ordenados.loc[
-            ordenados.hora_normalizada.eq(pd.Timedelta(0))
-        ].set_index(claves)["frio_kw"]
-        calidad["cierre"] = ordenados.loc[
-            ordenados.hora_normalizada.eq(pd.Timedelta(hours=23, minutes=59))
-        ].set_index(claves)["frio_kw"]
-        apta = (
-            calidad.inicio.eq(0) & calidad.cierre.notna() & calidad.cierre.gt(0)
-            & calidad.nulos.eq(0) & calidad.descensos.eq(0)
-            & calidad.negativos.eq(0) & calidad.maximo.le(1_000_000)
-        )
+        calidad, _ = evaluar_calidad_frio(ee_temporal)
+        apta = calidad["apta_calidad"]
         fechas_frio = pd.Index(calidad.index.get_level_values("fecha")[apta])
         if fechas_frio.empty:
             raise ValueError("No se encontraron jornadas válidas del totalizador de frío.")
@@ -371,7 +351,7 @@ def construir_caracteristicas_predictivas(
 ) -> tuple[pd.DataFrame, pd.Series, dict]:
     """Construye X(D) sin utilizar nunca el valor del objetivo D+1.
 
-    Reutiliza la auditoría y la función de calendario de Fase 2. Para nuevas
+    Reutiliza las transformaciones compartidas de Fase 2. Para nuevas
     fuentes, los lags solo pueden utilizar el historial disponible en el Excel.
     Los extremos, las imputaciones y los indicadores respetan Train.
     """
@@ -397,70 +377,46 @@ def construir_caracteristicas_predictivas(
     ]
     X_original = base[columnas_industriales].apply(pd.to_numeric, errors="coerce")
 
-    # Igual que tratar_valores_extremos de Fase 2: únicamente límites Train.
+    # Aplicar límites aprendidos exclusivamente en Train.
     limites = pd.Series(reglas["umbrales_industriales"], dtype=float)
-    X_limpio = X_original.mask(X_original.gt(limites, axis="columns"))
+    X_limpio, _ = aplicar_umbrales_extremos(X_original, limites)
 
-    # Los dos ratios seleccionados deben calcularse ANTES de imputar bases.
-    # Misma regla de calcular_ratios_industriales (num >= 0, denom > 0).
-    def ratio_seguro(num: pd.Series, den: pd.Series) -> pd.Series:
-        return (num.where(num >= 0) / den.where(den > 0)).replace(
-            [np.inf, -np.inf], np.nan
-        )
-
+    # Calcular los ratios necesarios ANTES de imputar las variables base.
     r_serv = "Ratio | Frio sobre Servicios"
     r_bodega = "Ratio | Frio por Hl Bodega"
-    ratio_serv = ratio_seguro(X_limpio["frio_kw"], X_limpio["EE | Servicios (Kw)"])
-    ratio_bodega = ratio_seguro(
-        X_limpio["frio_kw"], X_limpio["Produccion | Hl Producido Bodega"]
-    )
-
-    # Misma máscara de extremos de derivadas: 10 * percentil 99 de Train.
-    limites_ratios = reglas["umbrales_derivadas"]
-    for nombre, serie in [(r_serv, ratio_serv), (r_bodega, ratio_bodega)]:
-        limite = limites_ratios.get(nombre)
-        if limite is not None:
-            if nombre == r_serv:
-                ratio_serv = serie.mask(serie > float(limite))
-            else:
-                ratio_bodega = serie.mask(serie > float(limite))
-
+    nombres_ratios = [r_serv, r_bodega]
+    ratios = calcular_ratios_industriales(X_limpio, nombres=nombres_ratios)
     if r_bodega not in reglas["indicadores_derivadas"]:
         raise ValueError("Train no registró el indicador faltante del ratio Bodega.")
+    medianas_derivadas = reglas["medianas_derivadas"]
+    sin_mediana = sorted(set(nombres_ratios) - set(medianas_derivadas))
+    if sin_mediana:
+        raise ValueError(f"Faltan medianas derivadas de Train: {sin_mediana}")
+    ratios = aplicar_transformacion_derivada(
+        ratios, nombres_ratios, medianas_derivadas,
+        reglas["umbrales_derivadas"],
+        [c for c in reglas["indicadores_derivadas"] if c in nombres_ratios]
+    )
 
-    # Variables industriales imputadas con medianas originales de Train.
+    # El modelo final no utiliza indicadores industriales de faltantes.
     medianas = pd.Series(reglas["medianas_industriales"], dtype=float)
     sin_mediana = sorted(set(columnas_industriales) - set(medianas.index))
     if sin_mediana:
         raise ValueError(f"Faltan medianas industriales: {sin_mediana}")
-    X = X_limpio.fillna(medianas).copy()
-
-    # Reutilizar literalmente agregar_calendario de Fase 2.
+    X = aplicar_imputacion_industrial(X_limpio, medianas)
     X = agregar_calendario(X, fechas)
 
-    # Lags: mismos desplazamientos y rolling estrictamente previos de Fase 2.
-    serie_frio = base.set_index("fecha")["frio_kw"].sort_index().asfreq("D")
-    his = pd.DataFrame(index=serie_frio.index)
-    his["frio_lag_7d"] = serie_frio.shift(7)
-    his["frio_media_3d"] = serie_frio.shift(1).rolling(
-        3, min_periods=3
-    ).mean()
-    his["frio_media_7d"] = serie_frio.shift(1).rolling(
-        7, min_periods=7
-    ).mean()
-    his = his.reindex(pd.DatetimeIndex(fechas)).reset_index(drop=True)
+    # Utilizar la serie de frío sin imputar, como en el entrenamiento.
+    columnas_hist = ["frio_lag_7d", "frio_media_3d", "frio_media_7d"]
     medianas_hist = reglas["medianas_historicas"]
-    for columna in his:
+    for columna in columnas_hist:
         if columna not in medianas_hist:
             raise ValueError(f"Falta mediana histórica de Train: {columna}")
-        if columna == "frio_media_7d":
-            X[f"{columna} | faltante"] = his[columna].isna().astype(int)
-        X[columna] = his[columna].fillna(float(medianas_hist[columna]))
+    X = incorporar_historicas(X, fechas, calcular_historicas(base))
+    X = aplicar_imputacion_historica(X, medianas_hist, columnas_hist)
 
-    X[f"{r_bodega} | faltante"] = ratio_bodega.isna().astype(int)
-    if r_serv not in reglas["medianas_derivadas"]:
-        raise ValueError(f"Falta mediana derivada de Train: {r_serv}")
-    X[r_serv] = ratio_serv.fillna(float(reglas["medianas_derivadas"][r_serv]))
+    # Los indicadores de ratios se calcularon antes de imputarlos.
+    X = pd.concat([X, ratios], axis=1)
 
     faltantes = sorted(set(features) - set(X.columns))
     if faltantes:
@@ -602,6 +558,20 @@ def comparar_con_train(
         )
     print("Comparación completada sin consultar targets ni Test.")
 
+def load_and_preprocess(
+    filepath: str | Path, features: list[str] | None = None, *, version: str = "latest"
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Carga el Excel y devuelve X(D) y fechas mediante el pipeline compartido.
+
+    Si no se proporcionan las columnas, usa el modelo registrado indicado.
+    No ajusta parámetros ni usa el objetivo D+1.
+    """
+    if features is None:
+        _, features, _ = load_model(version)
+    X, fechas, _ = construir_caracteristicas_predictivas(filepath, features)
+    return X, fechas
+
+
 def predict_consumption(filepath: str | Path, version: str = "latest") -> pd.DataFrame:
     """Predice el consumo de D+1 para cada jornada D válida del Excel.
 
@@ -609,7 +579,7 @@ def predict_consumption(filepath: str | Path, version: str = "latest") -> pd.Dat
     No se lee la columna objetivo ni se calculan métricas de evaluación.
     """
     modelo, features, version_cargada = load_model(version)
-    X, fechas, _ = construir_caracteristicas_predictivas(filepath, features)
+    X, fechas = load_and_preprocess(filepath, features)
 
     if X.empty:
         raise ValueError("El Excel no contiene jornadas válidas para predecir.")

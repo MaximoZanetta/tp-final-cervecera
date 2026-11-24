@@ -98,6 +98,16 @@ def cargar_electricidad():
     return ee_raw
 
 
+def normalizar_horas(horas):
+    """Corrige únicamente los desfases exactos de un segundo."""
+    esperadas = pd.TimedeltaIndex(
+        [pd.Timedelta(hours=h) for h in range(24)]
+        + [pd.Timedelta(hours=23, minutes=59)]
+    )
+    segundo = pd.Timedelta(seconds=1)
+    return horas.where(~(horas - segundo).isin(esperadas), horas - segundo)
+
+
 def limpiar_temporal(ee_raw):
     """
     Excluye registros sin fecha u hora y normaliza
@@ -111,29 +121,10 @@ def limpiar_temporal(ee_raw):
 
     registros_excluidos = len(ee_raw) - len(ee)
 
-    # 2. Definir los 25 horarios esperados
-    horarios_esperados = pd.TimedeltaIndex(
-        [pd.Timedelta(hours=h) for h in range(24)]
-        + [pd.Timedelta(hours=23, minutes=59)]
-    )
-
-    un_segundo = pd.Timedelta(seconds=1)
-
-    # 3. Conservar el horario original
+    # Conservar el horario original y normalizar el desfase de un segundo.
     ee["hora_original"] = ee["hora"]
-
-    # 4. Detectar desfases exactos
-    desfase = (
-        ee["hora_original"] - un_segundo
-    ).isin(horarios_esperados)
-
-    # 5. Normalizar sin alterar la lectura original
-    ee["hora_normalizada"] = (
-        ee["hora_original"].where(
-            ~desfase,
-            ee["hora_original"] - un_segundo
-        )
-    )
+    ee["hora_normalizada"] = normalizar_horas(ee["hora_original"])
+    desfase = ee["hora_original"].ne(ee["hora_normalizada"])
 
     # 6. Controlar las colisiones de horarios
     claves_originales = [
@@ -306,12 +297,8 @@ def seleccionar_jornadas_temporales(ee_trabajo):
     return ee_temporal
 
 
-def controlar_calidad_frio(ee_temporal):
-    """
-    Evalúa la calidad de las 25 lecturas de cada
-    jornada y conserva cierres de fuentes válidas.
-    """
-
+def evaluar_calidad_frio(ee_temporal):
+    """Evalúa las seis reglas de calidad sin exigir tamaños históricos."""
     claves = ["archivo_origen", "fecha"]
 
     datos = ee_temporal.sort_values(
@@ -397,6 +384,17 @@ def controlar_calidad_frio(ee_temporal):
     calidad["apta_calidad"] = (
         ~calidad[controles].any(axis=1)
     )
+
+    return calidad, controles
+
+
+def controlar_calidad_frio(ee_temporal):
+    """
+    Evalúa la calidad de las 25 lecturas de cada
+    jornada y conserva cierres de fuentes válidas.
+    """
+
+    calidad, controles = evaluar_calidad_frio(ee_temporal)
 
     # Recuperar los cierres de las jornadas aprobadas
     cierres_aprobados = (
@@ -758,16 +756,7 @@ def integrar_produccion(dataset_integrado, dataset_base):
         )
 
         # 2. Normalizar desfases exactos de un segundo
-        un_segundo = pd.Timedelta(seconds=1)
-
-        desfase = (
-            horas - un_segundo
-        ).isin(horarios_validos)
-
-        df["hora_normalizada"] = horas.where(
-            ~desfase,
-            horas - un_segundo
-        )
+        df["hora_normalizada"] = normalizar_horas(horas)
 
         # 3. Utilizar solo fechas elegidas de esta fuente
         fechas_elegidas = dataset_base.loc[
@@ -953,16 +942,7 @@ def integrar_mycom(dataset_integrado, dataset_base):
         )
 
         # 2. Corregir desfases exactos de un segundo
-        un_segundo = pd.Timedelta(seconds=1)
-
-        desfase = (
-            horas - un_segundo
-        ).isin(horarios_validos)
-
-        df["hora_normalizada"] = horas.where(
-            ~desfase,
-            horas - un_segundo
-        )
+        df["hora_normalizada"] = normalizar_horas(horas)
 
         # 3. Mantener las fechas elegidas de este Excel
         fechas_elegidas = dataset_base.loc[
@@ -1080,7 +1060,6 @@ def integrar_agua(dataset_integrado, dataset_base):
 
     claves = ["archivo_origen", "fecha"]
     cierre = pd.Timedelta(hours=23, minutes=59)
-    un_segundo = pd.Timedelta(seconds=1)
 
     horarios_validos = {
         pd.Timedelta(hours=h) for h in range(24)
@@ -1121,14 +1100,7 @@ def integrar_agua(dataset_integrado, dataset_base):
             errors="coerce"
         )
 
-        desfase = (
-            horas - un_segundo
-        ).isin(horarios_validos)
-
-        df["hora_normalizada"] = horas.where(
-            ~desfase,
-            horas - un_segundo
-        )
+        df["hora_normalizada"] = normalizar_horas(horas)
 
         # 4. Identificar jornadas completas
         control = (
@@ -1264,7 +1236,6 @@ def integrar_area_consolidada(
 
     claves = ["archivo_origen", "fecha"]
     cierre = pd.Timedelta(hours=23, minutes=59)
-    un_segundo = pd.Timedelta(seconds=1)
 
     horarios_validos = {
         pd.Timedelta(hours=h) for h in range(24)
@@ -1306,14 +1277,7 @@ def integrar_area_consolidada(
             errors="coerce"
         )
 
-        desfase = (
-            horas - un_segundo
-        ).isin(horarios_validos)
-
-        df["hora_normalizada"] = horas.where(
-            ~desfase,
-            horas - un_segundo
-        )
+        df["hora_normalizada"] = normalizar_horas(horas)
 
         # 4. Controlar jornadas completas
         control = (
@@ -1576,17 +1540,20 @@ def filtrar_variables_faltantes(train, val, features):
     assert X_train.columns.equals(X_val.columns)
     return X_train, X_val, features_filtradas, columnas_descartadas
 
+def aplicar_umbrales_extremos(X, umbrales):
+    """Aplica límites superiores aprendidos en Train, sin reajustarlos."""
+    umbrales = pd.Series(umbrales, dtype=float).reindex(X.columns)
+    mascara = X.gt(umbrales, axis="columns")
+    return X.mask(mascara), mascara
+
+
 def tratar_valores_extremos(X_train, X_val):
     """Calcula 10×P99 solo en Train y aplica el mismo límite a Validation."""
     percentiles_99 = X_train.quantile(0.99)
     umbrales_extremos = (10 * percentiles_99).where(percentiles_99 > 0)
 
-    def aplicar_umbrales(X):
-        mascara = X.gt(umbrales_extremos, axis="columns")
-        return X.mask(mascara), mascara
-
-    X_train_limpio, extremos_train = aplicar_umbrales(X_train)
-    X_val_limpio, extremos_val = aplicar_umbrales(X_val)
+    X_train_limpio, extremos_train = aplicar_umbrales_extremos(X_train, umbrales_extremos)
+    X_val_limpio, extremos_val = aplicar_umbrales_extremos(X_val, umbrales_extremos)
 
     resumen_extremos = pd.DataFrame({
         "percentil_99_train": percentiles_99,
@@ -1609,6 +1576,15 @@ def tratar_valores_extremos(X_train, X_val):
     assert X_train_limpio.columns.equals(X_val_limpio.columns)
     return X_train_limpio, X_val_limpio, umbrales_extremos, resumen_extremos
 
+def aplicar_imputacion_industrial(X, medianas, columnas_indicadores=()):
+    """Imputa con medianas de Train y conserva indicadores previos a imputar."""
+    columnas_indicadores = list(columnas_indicadores)
+    resultado = X.fillna(pd.Series(medianas, dtype=float)).copy()
+    indicadores = X[columnas_indicadores].isna().astype(int)
+    indicadores.columns = [f"{c} | faltante" for c in columnas_indicadores]
+    return pd.concat([resultado, indicadores], axis=1)
+
+
 def imputar_faltantes(X_train_limpio, X_val_limpio):
     """Imputa Train/Validation con medianas Train y crea indicadores Train."""
     medianas_train = X_train_limpio.median()
@@ -1619,14 +1595,12 @@ def imputar_faltantes(X_train_limpio, X_val_limpio):
         X_train_limpio.columns[X_train_limpio.isna().any()].tolist()
     )
 
-    def transformar(X):
-        resultado = X.fillna(medianas_train).copy()
-        indicadores = X[columnas_indicadores].isna().astype(int)
-        indicadores.columns = [f"{c} | faltante" for c in columnas_indicadores]
-        return pd.concat([resultado, indicadores], axis=1)
-
-    X_train_final = transformar(X_train_limpio)
-    X_val_final = transformar(X_val_limpio)
+    X_train_final = aplicar_imputacion_industrial(
+        X_train_limpio, medianas_train, columnas_indicadores
+    )
+    X_val_final = aplicar_imputacion_industrial(
+        X_val_limpio, medianas_train, columnas_indicadores
+    )
 
     print("\nIMPUTACIÓN DE VALORES FALTANTES")
     print("Variables originales:", X_train_limpio.shape[1])
@@ -1685,12 +1659,13 @@ def agregar_calendario(X, fechas):
     return resultado
 
 
-def agregar_historicas(X_train_cal, X_val_cal, train, val, frio_diario):
-    """Construye lags estrictamente pasados para Train y Validation.
+COLUMNAS_HISTORICAS = [
+    "frio_lag_1d", "frio_lag_7d", "frio_media_3d", "frio_media_7d"
+]
 
-    La serie de consumo se desplaza un día antes de aplicar medias móviles.
-    Test no se transforma hasta que finaliza la selección.
-    """
+
+def calcular_historicas(frio_diario):
+    """Calcula los lags y medias usando días calendario estrictamente previos."""
     serie_frio = (
         frio_diario.set_index("fecha")["frio_kw"].sort_index().asfreq("D")
     )
@@ -1704,21 +1679,30 @@ def agregar_historicas(X_train_cal, X_val_cal, train, val, frio_diario):
         serie_frio.shift(1).rolling(7, min_periods=7).mean()
     )
     historicas = historicas.reset_index()
-    columnas_historicas = [
-        "frio_lag_1d", "frio_lag_7d", "frio_media_3d", "frio_media_7d"
-    ]
+    return historicas
 
-    def incorporar(X, particion):
-        valores = particion[["fecha"]].merge(
-            historicas, on="fecha", how="left", validate="one_to_one"
-        )
-        resultado = X.copy()
-        for columna in columnas_historicas:
-            resultado[columna] = valores[columna].to_numpy()
-        return resultado
 
-    X_train_hist = incorporar(X_train_cal, train)
-    X_val_hist = incorporar(X_val_cal, val)
+def incorporar_historicas(X, fechas, historicas):
+    """Alinea las características históricas por fecha, sin usar D+1."""
+    valores = fechas.to_frame(name="fecha").merge(
+        historicas, on="fecha", how="left", validate="one_to_one"
+    )
+    resultado = X.copy()
+    for columna in COLUMNAS_HISTORICAS:
+        resultado[columna] = valores[columna].to_numpy()
+    return resultado
+
+
+def agregar_historicas(X_train_cal, X_val_cal, train, val, frio_diario):
+    """Construye lags estrictamente pasados para Train y Validation.
+
+    La serie de consumo se desplaza un día antes de aplicar medias móviles.
+    Test no se transforma hasta que finaliza la selección.
+    """
+    historicas = calcular_historicas(frio_diario)
+    columnas_historicas = COLUMNAS_HISTORICAS
+    X_train_hist = incorporar_historicas(X_train_cal, train["fecha"], historicas)
+    X_val_hist = incorporar_historicas(X_val_cal, val["fecha"], historicas)
     print("\nVARIABLES HISTÓRICAS")
     print("Características añadidas: 4")
     print("Train:", X_train_hist.shape)
@@ -1733,6 +1717,16 @@ def agregar_historicas(X_train_cal, X_val_cal, train, val, frio_diario):
     assert X_train_hist.columns.equals(X_val_hist.columns)
     return X_train_hist, X_val_hist
 
+def aplicar_imputacion_historica(X, medianas_historicas, columnas=None):
+    """Imputa cada variable histórica y crea su indicador de faltante."""
+    columnas = COLUMNAS_HISTORICAS if columnas is None else columnas
+    resultado = X.copy()
+    for columna in columnas:
+        resultado[f"{columna} | faltante"] = X[columna].isna().astype(int)
+        resultado[columna] = X[columna].fillna(medianas_historicas[columna])
+    return resultado
+
+
 def imputar_historicas(X_train_hist, X_val_hist):
     """Medianas históricas ajustadas en Train y aplicadas a Validation."""
     columnas_historicas = [
@@ -1741,15 +1735,8 @@ def imputar_historicas(X_train_hist, X_val_hist):
     medianas_historicas = X_train_hist[columnas_historicas].median()
     assert medianas_historicas.notna().all()
 
-    def transformar(X):
-        resultado = X.copy()
-        for columna in columnas_historicas:
-            resultado[f"{columna} | faltante"] = X[columna].isna().astype(int)
-            resultado[columna] = X[columna].fillna(medianas_historicas[columna])
-        return resultado
-
-    X_train_preparado = transformar(X_train_hist)
-    X_val_preparado = transformar(X_val_hist)
+    X_train_preparado = aplicar_imputacion_historica(X_train_hist, medianas_historicas)
+    X_val_preparado = aplicar_imputacion_historica(X_val_hist, medianas_historicas)
     print("\nIMPUTACIÓN DE VARIABLES HISTÓRICAS")
     print("Medianas de Train:")
     print(medianas_historicas.round(4).to_string())
@@ -1787,7 +1774,6 @@ def integrar_kpi(dataset_integrado, dataset_base):
     )
 
     cierre = pd.Timedelta(hours=23, minutes=59)
-    un_segundo = pd.Timedelta(seconds=1)
 
     horarios_validos = {
         pd.Timedelta(hours=h) for h in range(24)
@@ -1832,14 +1818,7 @@ def integrar_kpi(dataset_integrado, dataset_base):
             errors="coerce"
         )
 
-        desfase = (
-            horas - un_segundo
-        ).isin(horarios_validos)
-
-        horas = horas.where(
-            ~desfase,
-            horas - un_segundo
-        )
+        horas = normalizar_horas(horas)
 
         # 3. Crear tabla con las variables necesarias
         datos = pd.DataFrame({
@@ -2084,7 +2063,7 @@ def crear_variables_eficiencia(dataset_kpi):
     return dataset_eficiencia, columnas_eficiencia
 
 
-def calcular_ratios_industriales(X):
+def calcular_ratios_industriales(X, nombres=None):
     """
     Construye cuatro ratios industriales a partir
     de variables base previamente depuradas.
@@ -2111,6 +2090,9 @@ def calcular_ratios_industriales(X):
             "Produccion | Hl Producido Bodega"
         )
     }
+
+    if nombres is not None:
+        formulas = {nombre: formulas[nombre] for nombre in nombres}
 
     ratios = pd.DataFrame(index=X.index)
 
@@ -2270,6 +2252,50 @@ def unir_caracteristicas_derivadas(
     return resultado, columnas_nuevas
 
 
+def limpiar_valores_derivados(X, nuevas_features):
+    """Aplica las reglas de validez de eficiencia, ratios e interacciones."""
+    columnas_eficiencia = [
+        c for c in nuevas_features
+        if c.startswith("Eficiencia | ")
+    ]
+
+    columnas_ratios_interacciones = [
+        c for c in nuevas_features
+        if c.startswith(("Ratio | ", "Interaccion | "))
+    ]
+
+    resultado = X.copy()
+
+    resultado[nuevas_features] = (
+        resultado[nuevas_features]
+        .replace([np.inf, -np.inf], np.nan)
+    )
+
+    # Desviaciones inferiores a -100 %
+    for columna in columnas_eficiencia:
+        resultado[columna] = resultado[columna].mask(
+            resultado[columna] < -100
+        )
+
+    # Ratios e interacciones negativos
+    for columna in columnas_ratios_interacciones:
+        resultado[columna] = resultado[columna].mask(
+            resultado[columna] < 0
+        )
+
+    return resultado
+
+def aplicar_imputacion_derivada(X, nuevas_features, medianas, indicadores):
+    """Crea indicadores antes de imputar con los parámetros de Train."""
+    resultado = X.copy()
+    for columna in indicadores:
+        resultado[f"{columna} | faltante"] = resultado[columna].isna().astype(int)
+    resultado[nuevas_features] = resultado[nuevas_features].fillna(
+        pd.Series(medianas, dtype=float)
+    )
+    return resultado
+
+
 def preparar_caracteristicas_derivadas(
     X_train_ampliado,
     X_val_ampliado,
@@ -2285,41 +2311,8 @@ def preparar_caracteristicas_derivadas(
     train_limpio = X_train_ampliado.copy()
     val_limpio = X_val_ampliado.copy()
 
-    columnas_eficiencia = [
-        c for c in nuevas_features
-        if c.startswith("Eficiencia | ")
-    ]
-
-    columnas_ratios_interacciones = [
-        c for c in nuevas_features
-        if c.startswith(("Ratio | ", "Interaccion | "))
-    ]
-
-    # 1. Limpiar valores imposibles
-    def limpiar_valores(X):
-        resultado = X.copy()
-
-        resultado[nuevas_features] = (
-            resultado[nuevas_features]
-            .replace([np.inf, -np.inf], np.nan)
-        )
-
-        # Desviaciones inferiores a -100 %
-        for columna in columnas_eficiencia:
-            resultado[columna] = resultado[columna].mask(
-                resultado[columna] < -100
-            )
-
-        # Ratios e interacciones negativos
-        for columna in columnas_ratios_interacciones:
-            resultado[columna] = resultado[columna].mask(
-                resultado[columna] < 0
-            )
-
-        return resultado
-
-    train_limpio = limpiar_valores(train_limpio)
-    val_limpio = limpiar_valores(val_limpio)
+    train_limpio = limpiar_valores_derivados(train_limpio, nuevas_features)
+    val_limpio = limpiar_valores_derivados(val_limpio, nuevas_features)
 
     # 2. Calcular umbrales exclusivamente con Train
     p99_train = train_limpio[nuevas_features].quantile(0.99)
@@ -2329,22 +2322,11 @@ def preparar_caracteristicas_derivadas(
     )
 
     # 3. Detectar y tratar extremos
-    mascara_train = train_limpio[nuevas_features].gt(
-        umbrales_derivadas,
-        axis="columns"
+    train_limpio[nuevas_features], mascara_train = aplicar_umbrales_extremos(
+        train_limpio[nuevas_features], umbrales_derivadas
     )
-
-    mascara_val = val_limpio[nuevas_features].gt(
-        umbrales_derivadas,
-        axis="columns"
-    )
-
-    train_limpio[nuevas_features] = (
-        train_limpio[nuevas_features].mask(mascara_train)
-    )
-
-    val_limpio[nuevas_features] = (
-        val_limpio[nuevas_features].mask(mascara_val)
+    val_limpio[nuevas_features], mascara_val = aplicar_umbrales_extremos(
+        val_limpio[nuevas_features], umbrales_derivadas
     )
 
     # 4. Identificar variables con faltantes en Train
@@ -2365,23 +2347,12 @@ def preparar_caracteristicas_derivadas(
         )
 
     # 6. Imputar y agregar indicadores
-    def transformar(X):
-        resultado = X.copy()
-
-        for columna in columnas_indicadores:
-            resultado[f"{columna} | faltante"] = (
-                resultado[columna].isna().astype(int)
-            )
-
-        resultado[nuevas_features] = (
-            resultado[nuevas_features]
-            .fillna(medianas_derivadas)
-        )
-
-        return resultado
-
-    X_train_completo = transformar(train_limpio)
-    X_val_completo = transformar(val_limpio)
+    X_train_completo = aplicar_imputacion_derivada(
+        train_limpio, nuevas_features, medianas_derivadas, columnas_indicadores
+    )
+    X_val_completo = aplicar_imputacion_derivada(
+        val_limpio, nuevas_features, medianas_derivadas, columnas_indicadores
+    )
 
     # 7. Mostrar resultados
     print("\nPREPARACIÓN DE CARACTERÍSTICAS DERIVADAS")
@@ -2835,49 +2806,15 @@ def transformar_test_final(
     """
     # Mismas columnas y orden definidos en Train.
     X_test = test[features_filtradas].copy()
-    X_test_limpio = X_test.mask(
-        X_test.gt(umbrales_extremos, axis="columns")
+    X_test_limpio, _ = aplicar_umbrales_extremos(X_test, umbrales_extremos)
+    X_test_final = aplicar_imputacion_industrial(
+        X_test_limpio, medianas_train, columnas_indicadores
     )
-
-    X_test_final = X_test_limpio.fillna(medianas_train).copy()
-    indicadores = X_test_limpio[columnas_indicadores].isna().astype(int)
-    indicadores.columns = [f"{c} | faltante" for c in columnas_indicadores]
-    X_test_final = pd.concat([X_test_final, indicadores], axis=1)
-
     X_test_cal = agregar_calendario(X_test_final, test["fecha"])
-
-    # Se utiliza la misma definición de lags y medias pasadas del entrenamiento.
-    serie_frio = (
-        frio_diario.set_index("fecha")["frio_kw"].sort_index().asfreq("D")
+    X_test_hist = incorporar_historicas(
+        X_test_cal, test["fecha"], calcular_historicas(frio_diario)
     )
-    historicas = pd.DataFrame(index=serie_frio.index)
-    historicas["frio_lag_1d"] = serie_frio.shift(1)
-    historicas["frio_lag_7d"] = serie_frio.shift(7)
-    historicas["frio_media_3d"] = (
-        serie_frio.shift(1).rolling(3, min_periods=3).mean()
-    )
-    historicas["frio_media_7d"] = (
-        serie_frio.shift(1).rolling(7, min_periods=7).mean()
-    )
-    historicas = historicas.reset_index()
-    columnas_historicas = [
-        "frio_lag_1d", "frio_lag_7d", "frio_media_3d", "frio_media_7d"
-    ]
-    valores = test[["fecha"]].merge(
-        historicas, on="fecha", how="left", validate="one_to_one"
-    )
-    X_test_hist = X_test_cal.copy()
-    for columna in columnas_historicas:
-        X_test_hist[columna] = valores[columna].to_numpy()
-
-    X_test_preparado = X_test_hist.copy()
-    for columna in columnas_historicas:
-        X_test_preparado[f"{columna} | faltante"] = (
-            X_test_hist[columna].isna().astype(int)
-        )
-        X_test_preparado[columna] = X_test_hist[columna].fillna(
-            medianas_historicas[columna]
-        )
+    X_test_preparado = aplicar_imputacion_historica(X_test_hist, medianas_historicas)
 
     assert X_test_limpio.shape == (159, 87)
     assert X_test_preparado.shape == (159, 144)
@@ -2891,6 +2828,20 @@ def transformar_test_final(
     return X_test_limpio, X_test_preparado
 
 
+def aplicar_transformacion_derivada(
+    X, nuevas_features, medianas_derivadas, umbrales_derivadas,
+    indicadores_derivadas
+):
+    """Aplica limpieza, umbrales e imputación aprendidos con Train."""
+    resultado = limpiar_valores_derivados(X, nuevas_features)
+    resultado[nuevas_features], _ = aplicar_umbrales_extremos(
+        resultado[nuevas_features], umbrales_derivadas
+    )
+    return aplicar_imputacion_derivada(
+        resultado, nuevas_features, medianas_derivadas, indicadores_derivadas
+    )
+
+
 def transformar_derivadas_test(
     X_test_ampliado,
     nuevas_features,
@@ -2898,66 +2849,11 @@ def transformar_derivadas_test(
     umbrales_derivadas,
     indicadores_derivadas
 ):
-    """
-    Aplica a Test las reglas de limpieza e imputación
-    aprendidas exclusivamente con Train.
-
-    No ajusta ningún parámetro nuevo.
-    """
-
-    resultado = X_test_ampliado.copy()
-
-    columnas_eficiencia = [
-        c for c in nuevas_features
-        if c.startswith("Eficiencia | ")
-    ]
-
-    columnas_ratios_interacciones = [
-        c for c in nuevas_features
-        if c.startswith(("Ratio | ", "Interaccion | "))
-    ]
-
-    # 1. Reemplazar infinitos
-    resultado[nuevas_features] = (
-        resultado[nuevas_features]
-        .replace([np.inf, -np.inf], np.nan)
+    """Aplica a Test los parámetros de Train, sin ajustarlos nuevamente."""
+    return aplicar_transformacion_derivada(
+        X_test_ampliado, nuevas_features, medianas_derivadas,
+        umbrales_derivadas, indicadores_derivadas
     )
-
-    # 2. Aplicar las mismas reglas de validez
-    for columna in columnas_eficiencia:
-        resultado[columna] = resultado[columna].mask(
-            resultado[columna] < -100
-        )
-
-    for columna in columnas_ratios_interacciones:
-        resultado[columna] = resultado[columna].mask(
-            resultado[columna] < 0
-        )
-
-    # 3. Aplicar umbrales aprendidos con Train
-    mascara_extremos = resultado[nuevas_features].gt(
-        umbrales_derivadas,
-        axis="columns"
-    )
-
-    resultado[nuevas_features] = (
-        resultado[nuevas_features]
-        .mask(mascara_extremos)
-    )
-
-    # 4. Crear los mismos indicadores definidos en Train
-    for columna in indicadores_derivadas:
-        resultado[f"{columna} | faltante"] = (
-            resultado[columna].isna().astype(int)
-        )
-
-    # 5. Imputar con medianas de Train
-    resultado[nuevas_features] = (
-        resultado[nuevas_features]
-        .fillna(medianas_derivadas)
-    )
-
-    return resultado
 
 
 def exportar_dataset_final(
